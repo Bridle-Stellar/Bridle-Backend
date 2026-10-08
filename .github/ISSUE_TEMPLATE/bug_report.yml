@@ -1,0 +1,47 @@
+name: Bug report
+description: The backend or SDK does something it shouldn't, or doesn't do something it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issue?** Don't file it here. Use [private vulnerability reporting](https://github.com/Bridle-Stellar/Bridle-Backend/security/advisories/new) instead (see SECURITY.md).
+
+        Never paste a secret key (`S...`) or your `.env` into an issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Which endpoint or SDK call, what you sent, and what came back (status code and body, or the exception).
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: A failing test under `tests/` is best. Otherwise, the exact curl commands or SDK snippet.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Backend logs
+      description: Relevant log lines from the backend, with any secrets removed.
+      render: text
+  - type: input
+    id: commit
+    attributes:
+      label: Commit and network
+      description: The backend commit you ran, the network, and the contract ID if a chain call is involved.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "Python 3.12, stellar-sdk 16.x, fastapi 0.11x"

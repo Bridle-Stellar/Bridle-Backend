@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a new endpoint, SDK capability, or operational improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can an owner, agent developer, or operator not do today, or what goes wrong for them? Describe the situation, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: New or changed endpoints, schemas, SDK methods, or config.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Where it lives
+      description: Which module(s) would change? Remember the contract is the only policy authority. This backend must not enforce rules the contract doesn't (see CONTRIBUTING.md, "Module boundaries").
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
