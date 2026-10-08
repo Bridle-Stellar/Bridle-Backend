@@ -117,7 +117,13 @@ def http(backend):
 
 @pytest.fixture(scope="module")
 def agent_client(backend, deployment):
-    return BridleClient(relay_url=backend, agent_secret_key=deployment.agent.secret, timeout=60)
+    return BridleClient(
+        relay_url=backend,
+        agent_secret_key=deployment.agent.secret,
+        timeout=60,
+        contract_id=deployment.contract_id,
+        network_passphrase=NETWORK_PASSPHRASE,
+    )
 
 
 def _owner_action(http, rpc, deployment, path: str, body: dict) -> None:

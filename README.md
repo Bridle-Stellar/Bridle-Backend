@@ -42,8 +42,10 @@ and the SEP-41 transfer the relayer submits afterward requires the same
 from the agent as its "from". A signed Soroban authorization entry is
 cryptographic proof the agent itself requested precisely this
 destination/token/amount; the relayer can choose which spend to *ask* the
-agent to sign and can submit the result, but cannot fabricate, alter, or
-reuse one.
+agent to sign and can submit the result, but cannot alter or reuse one.
+It can't get a different spend signed either: the SDK decodes both entries
+from `/relay/prepare` and refuses to sign unless they match the payment the
+agent requested (see "Using the client SDK").
 
 This backend's relayer key (`RELAYER_SECRET_KEY`) reflects that directly:
 
@@ -304,12 +306,25 @@ two-step `POST /policy/ownership/transfer` (`{new_owner, owner_public_key}`)
 ```python
 from bridle_sdk import BridleClient, BridleRejected
 
-client = BridleClient(relay_url="http://localhost:8000", agent_secret_key="S...")
+client = BridleClient(
+    relay_url="http://localhost:8000",
+    agent_secret_key="S...",
+    contract_id="C...",                                    # pin your Bridle Contract instance
+    network_passphrase="Test SDF Network ; September 2015",
+)
 try:
     result = client.pay(destination="GDEST...", amount="1000000", token="native")
 except BridleRejected as e:
     print(e.reason, e.message)
 ```
+
+The SDK doesn't trust the relay to choose what it signs. Before signing,
+it decodes both entries and raises `BridleVerificationError` (nothing
+signed, nothing sent) unless the `transfer` is exactly `amount` to
+`destination` on the requested token, the `check_and_record_spend` matches,
+both are for this agent, and neither carries nested authorizations.
+`contract_id` and `network_passphrase` are optional but recommended. They
+also pin which contract runs the policy check and which network it's on.
 
 `agent_secret_key` is the Stellar secret key for the agent identity
 registered with Bridle Contract — see "Auth model" above for why the SDK
@@ -348,7 +363,9 @@ push to `main` and every pull request.
 - `tests/test_sync_worker.py` — sync worker ingestion of real
   `spend_approved` / `spend_rejected` / policy events, including the
   contract `RejectReason` → API `rejection_reason` mapping and dedupe.
-- `tests/test_sdk_client.py` — unit test for the SDK's own signing step.
+- `tests/test_sdk_client.py` — the SDK's signing step, including refusing
+  tampered `/relay/prepare` entries (other destination, amount, token,
+  function, signer, contract, network, or nested authorizations).
 - `tests/test_transactions_api.py` — filtering, pagination, and the
   summary/stats aggregate calculations against a seeded in-memory SQLite DB.
 
