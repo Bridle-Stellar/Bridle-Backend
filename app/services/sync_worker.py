@@ -22,7 +22,9 @@ from app.services.soroban_client import (
     EVENT_SPEND_APPROVED,
     EVENT_SPEND_REJECTED,
     RawContractEvent,
+    SorobanCallError,
     SorobanContractClient,
+    parse_reject_reason,
 )
 
 logger = logging.getLogger("bridle.sync_worker")
@@ -115,41 +117,55 @@ async def _ingest_spend_event(db, event: RawContractEvent) -> None:
     ledger range (or a relay call that also gets picked up here) never
     double-counts a spend.
 
-    Field names here (agent/destination as topics; token, amount plus
-    spent_today/remaining_today or reason as data) are confirmed by Bridle
-    Contract's README event table; the exact data-payload *wire shape*
-    (map vs. positional vec) is not, so `event.data` may need adjusting
-    here if it turns out not to decode to a plain dict — see
-    soroban_client.py's `_decode_event_value`.
+    Shape verified against Bridle-Contract's docs/INTERFACE.md ("Events")
+    and real testnet events: topics are [event name, agent, destination];
+    data is a map with amount and token, plus spent_today/remaining_today
+    (spend_approved) or reason, a RejectReason enum (spend_rejected).
+    Fields are read strictly: a missing one raises, so the worker retries
+    loudly instead of writing a wrong row.
     """
     existing = await db.scalar(select(Transaction).where(Transaction.contract_tx_hash == event.tx_hash))
     if existing is not None:
         return
 
     topics = event.topic.split(".")  # event_name.agent.destination, per soroban_client._decode_topic
-    agent = topics[1] if len(topics) > 1 else None
-    destination = topics[2] if len(topics) > 2 else event.data.get("destination", "unknown")
+    if len(topics) != 3:
+        raise SorobanCallError(f"{event.event_type} should have 3 topics, got {event.topic!r}")
+    _, agent, destination = topics
 
     approved = event.event_type == EVENT_SPEND_APPROVED
+    if approved:
+        reason, detail = None, "Backfilled from chain event (not relayed through this backend)."
+    else:
+        variant = parse_reject_reason(event.data["reason"])
+        reason = CONTRACT_REASON_TO_REJECTION[variant]
+        detail = f"Backfilled from chain event (not relayed through this backend). Contract reason: {variant}."
+
     db.add(
         Transaction(
             agent=agent,
             destination=destination,
-            token=event.data.get("token", "native"),
-            amount=float(event.data.get("amount", 0)),
+            token=event.data["token"],
+            amount=float(event.data["amount"]),
             status=PaymentStatus.APPROVED if approved else PaymentStatus.REJECTED,
-            rejection_reason=None if approved else _map_reason(event.data.get("reason")),
-            detail="Backfilled from chain event (not relayed through this backend).",
+            rejection_reason=reason,
+            detail=detail,
             contract_tx_hash=event.tx_hash,
             source="sync",
         )
     )
 
 
-def _map_reason(raw: str | None) -> RejectionReason | None:
-    if raw is None:
-        return None
-    try:
-        return RejectionReason(raw)
-    except ValueError:
-        return RejectionReason.CHAIN_AUTHORIZATION_DENIED
+# Contract RejectReason variant -> this API's RejectionReason. Variants with
+# no pre-check equivalent (the contract checks things this backend can't see
+# from a policy snapshot alone) map to chain_authorization_denied; the raw
+# variant name is kept in the row's `detail`.
+CONTRACT_REASON_TO_REJECTION: dict[str, RejectionReason] = {
+    "KillSwitchActive": RejectionReason.KILL_SWITCH_ACTIVE,
+    "DestinationNotAllowed": RejectionReason.DESTINATION_NOT_ALLOWLISTED,
+    "ExceedsPerCallMax": RejectionReason.PER_CALL_MAX_EXCEEDED,
+    "ExceedsDailyCap": RejectionReason.DAILY_CAP_EXCEEDED,
+    "UnknownAgent": RejectionReason.CHAIN_AUTHORIZATION_DENIED,
+    "InvalidAmount": RejectionReason.CHAIN_AUTHORIZATION_DENIED,
+    "WrongToken": RejectionReason.CHAIN_AUTHORIZATION_DENIED,
+}

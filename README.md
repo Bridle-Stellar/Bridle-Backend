@@ -19,15 +19,19 @@ the final authority on every request. The local pre-check
 substitute — see Bridle Contract's own README for the actual enforcement
 rules this backend mirrors for that pre-check.
 
-This README's function names, event names, and auth model are taken
-directly from Bridle Contract's published interface. Two things remain
-this backend's own best reading of that interface rather than something
-verified against the deployed contract's binary — both are called out
-inline in `app/services/soroban_client.py`'s module docstring:
-1. The exact ScVal wire shape of `PolicySnapshot`, `SpendStatus`, and
-   `SpendOutcome` returns (the contract names these Rust types but the
-   README doesn't specify their encoding).
-2. The non-topic data field names inside each contract event's payload.
+**Verified contract interface.** Function names, return-value encodings
+(`PolicySnapshot`, `SpendStatus`, `SpendOutcome`, `RejectReason`) and
+event topics/data fields match Bridle-Contract's
+[`docs/INTERFACE.md`](https://github.com/Bridle-Stellar/Bridle-Contract/blob/main/docs/INTERFACE.md)
+at Contract commit `d7a560b`. The decoders in
+`app/services/soroban_client.py` are tested against real XDR read back
+from that contract's testnet deployment
+(`CAICNEKY…VUK5`, see its
+[`docs/DEPLOYMENTS.md`](https://github.com/Bridle-Stellar/Bridle-Contract/blob/main/docs/DEPLOYMENTS.md)):
+`get_policy` and `get_spend_status` results, the `TransactionMeta` v4 of
+one approved and one rejected `check_and_record_spend`, and the emitted
+events. The fixtures are in `tests/fixtures/testnet_interface.py`. The
+decoders are strict: an unexpected shape is an error, never a default.
 
 ## Auth model
 
@@ -290,6 +294,12 @@ push to `main` and every pull request.
   actual decode/validate/sign code paths run for real — only the network
   submission itself is faked. Covers approval, each rejection reason, and
   a tampered-amount request being caught before it reaches the chain.
+- `tests/test_soroban_parsers.py` — the contract-return and event decoders
+  against real testnet XDR (`tests/fixtures/`), plus the malformed shapes
+  they must refuse (e.g. a missing `kill_switch` is an error, not "off").
+- `tests/test_sync_worker.py` — sync worker ingestion of real
+  `spend_approved` / `spend_rejected` / policy events, including the
+  contract `RejectReason` → API `rejection_reason` mapping and dedupe.
 - `tests/test_sdk_client.py` — unit test for the SDK's own signing step.
 - `tests/test_transactions_api.py` — filtering, pagination, and the
   summary/stats aggregate calculations against a seeded in-memory SQLite DB.
@@ -366,10 +376,6 @@ issues:
 - Add CSV export to `GET /transactions` (an `?format=csv` query param).
 - Add a real integration test against a locally-run Soroban testnet
   contract instance in CI.
-- Verify `_parse_policy_snapshot` / `_parse_spend_status` /
-  `_parse_spend_outcome` in `app/services/soroban_client.py` against the
-  contract's actual generated XDR spec, and tighten them from
-  best-reading to confirmed.
 - Swap the `sync_cursor` single-row bookmark for per-contract cursors
   ahead of multi-contract support.
 
