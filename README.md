@@ -1,5 +1,8 @@
 # Bridle Backend
 
+[![CI](https://github.com/Bridle-Stellar/Bridle-Backend/actions/workflows/ci.yml/badge.svg)](https://github.com/Bridle-Stellar/Bridle-Backend/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Off-chain relayer/middleware for **Bridle**: lets a human set spending
 guardrails for an autonomous AI agent's crypto wallet on Stellar. This
 repo sits between an AI agent's payment client and the destination
@@ -270,7 +273,11 @@ See `sdk/README.md` for the async variant and install instructions.
 pip install -r requirements.txt   # includes pytest, pytest-asyncio
 pip install -e sdk/
 pytest
+ruff check .                      # same lint CI runs
 ```
+
+CI (`.github/workflows/ci.yml`) runs both on Python 3.11 and 3.12 for every
+push to `main` and every pull request.
 
 - `tests/test_policy_service.py` — unit tests for the local pre-check,
   covering the same scenarios expected of the contract's own test suite
@@ -365,3 +372,7 @@ issues:
   best-reading to confirmed.
 - Swap the `sync_cursor` single-row bookmark for per-contract cursors
   ahead of multi-contract support.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

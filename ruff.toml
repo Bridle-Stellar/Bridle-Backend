@@ -1,0 +1,16 @@
+# Lint config for the backend and the SDK. CI runs `ruff check .` with this.
+target-version = "py311"
+line-length = 140
+extend-exclude = [".venv"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # long lines are allowed where a FastAPI decorator or SQL expression reads better on one line
+    "B008",  # Depends()/Query() in defaults is FastAPI's documented idiom
+    "UP017", # keep timezone.utc: the SDK still supports Python 3.9
+    "UP042", # str+Enum (not StrEnum) is deliberate: str(member) and DB values stay as they are
+]
+
+[lint.isort]
+known-first-party = ["app", "bridle_sdk", "tests"]
