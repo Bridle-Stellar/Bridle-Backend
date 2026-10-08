@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -29,11 +30,21 @@ from app.database import Base, get_db
 from app.deps import get_app_settings
 from app.main import app
 from app.services.policy_cache import PolicyStateCache
-from app.services.soroban_client import PolicyState, PreparedAuthorization, SpendAuthorization
+from app.services.soroban_client import (
+    AllowlistEntry,
+    PolicySnapshot,
+    PolicyState,
+    PolicyView,
+    PreparedAuthorization,
+    SpendAuthorization,
+    SpendStatus,
+)
 
 TEST_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
 TEST_CONTRACT_ID = StrKey.encode_contract(os.urandom(32))
 TEST_VALID_UNTIL_LEDGER = 1_000_000
+TEST_OWNER = Keypair.random().public_key
+TEST_PERIOD_START = 1791417600  # 2026-10-08T00:00:00Z
 
 # Real, StrKey-valid addresses — needed anywhere a value actually flows
 # through Address()/scval encoding (the relay flow), unlike the
@@ -87,8 +98,36 @@ class FakeSorobanClient:
     spend_calls: list[str] = field(default_factory=list)
     transfer_calls: list[str] = field(default_factory=list)
 
+    policy_reads: int = 0
+    read_error: Exception | None = None
+
+    async def get_policy_view(self) -> PolicyView:
+        """Expands `policy` into the full get_policy()/get_spend_status() pair."""
+        self.policy_reads += 1
+        if self.read_error is not None:
+            raise self.read_error
+        p = self.policy
+        return PolicyView(
+            snapshot=PolicySnapshot(
+                owner=TEST_OWNER,
+                agents=[],
+                token=p.token,
+                daily_cap=p.daily_cap,
+                per_call_max=p.per_call_max,
+                kill_switch_active=p.kill_switch_active,
+                allowlist=[AllowlistEntry(destination=d, category="general") for d in p.allowlist],
+            ),
+            status=SpendStatus(
+                daily_cap=p.daily_cap,
+                period_start=TEST_PERIOD_START,
+                spent_today=p.spent_today,
+                remaining_today=p.daily_cap - p.spent_today,
+            ),
+            fetched_at=datetime.now(timezone.utc),
+        )
+
     async def get_policy_state(self) -> PolicyState:
-        return self.policy
+        return (await self.get_policy_view()).to_state()
 
     async def prepare_check_and_record_spend(self, agent, destination, token_contract_id, amount) -> PreparedAuthorization:
         from stellar_sdk import scval

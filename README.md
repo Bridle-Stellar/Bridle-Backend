@@ -119,7 +119,7 @@ Agent's client (bridle_sdk)
   Destination account              Sync worker (app/services/sync_worker.py)
                                     backfills spends made outside the relay
 
-Bridle Frontend (dashboard) ── reads only ──▶ /transactions/* (this repo)
+Bridle Frontend (dashboard) ── reads only ──▶ /transactions/*, GET /policy (this repo)
                              ── policy changes ──▶ /policy/* → unsigned XDR
                                                     → signed by owner's wallet (e.g. Freighter)
                                                     → submitted directly to the network
@@ -226,6 +226,51 @@ curl "http://localhost:8000/transactions/stats?bucket=day"
 curl "http://localhost:8000/transactions/{id}"
 ```
 
+### `GET /policy` — current on-chain policy (read-only)
+
+The contract's own `get_policy()` and `get_spend_status()`, serialized
+as-is for the dashboard: owner, registered agents, governed token, caps,
+kill switch, the full allowlist with categories, and today's spend.
+Amounts are JSON integers in the token's smallest unit (stroops for XLM).
+
+```bash
+curl "http://localhost:8000/policy"
+curl "http://localhost:8000/policy?fresh=true"   # bypass the cache
+```
+
+```json
+{
+  "owner": "GD4IDHGFDQAOSFCXLXAK5FDNI5GHKLDZJEEC6Z7O5J5IMP3G5ATJ6OX4",
+  "agents": ["GCPV6J54IAAW7YKYF23KOEVGIHXEU5UH4LRCB3KTPECGXLPCDWGXLL5M"],
+  "token": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  "daily_cap": 10000000000,
+  "per_call_max": 3000000000,
+  "kill_switch_active": false,
+  "allowlist": [{"destination": "GD57XJTA237YNXWO6N3PAJKLZPIDKV77OJK7OCCFHVOZAOC6WQJ5OMDP", "category": "compute"}],
+  "spent_today": 500000000,
+  "remaining_today": 9500000000,
+  "period_start": "2026-10-08T00:00:00Z",
+  "fetched_at": "2026-10-08T15:30:00Z"
+}
+```
+
+(Values are from the Contract's testnet deployment; see
+`tests/fixtures/testnet_interface.py`.)
+
+- **Caching.** By default this is served from the same short-TTL cache as
+  the relay pre-check (`POLICY_CACHE_TTL_SECONDS`, default 2s);
+  `fetched_at` says when the chain was actually read. Pass `?fresh=true`
+  to read the chain now. Do that before acting on `kill_switch_active`,
+  since a cached reading can be up to one TTL old.
+- **Failure.** If the chain can't be read, or returns something the strict
+  decoder doesn't recognize, the response is `502` and there is no policy
+  in the body:
+  `{"detail": {"error": "policy_unavailable", "message": "..."}}`. It never
+  falls back to a default, and `?fresh=true` never falls back to a cached
+  value.
+- `remaining_today` can be negative if the owner lowered `daily_cap` below
+  what was already spent today.
+
 ### Policy write proxy
 
 The frontend never talks to the Soroban contract directly for policy
@@ -294,6 +339,9 @@ push to `main` and every pull request.
   actual decode/validate/sign code paths run for real — only the network
   submission itself is faked. Covers approval, each rejection reason, and
   a tampered-amount request being caught before it reaches the chain.
+- `tests/test_policy_api.py` — `GET /policy` from real testnet XDR to
+  JSON, cache hit vs `?fresh=true`, kill switch on, allowlist
+  serialization, and 502 on chain failure/timeout (never a default policy).
 - `tests/test_soroban_parsers.py` — the contract-return and event decoders
   against real testnet XDR (`tests/fixtures/`), plus the malformed shapes
   they must refuse (e.g. a missing `kill_switch` is an error, not "off").
@@ -342,11 +390,11 @@ app/
   routers/
     relay.py         POST /relay/prepare, POST /relay/submit
     transactions.py  GET /transactions, /transactions/summary, /transactions/stats
-    policy.py         POST /policy/* (owner-only contract calls, see above)
+    policy.py        GET /policy, POST /policy/* (owner-only contract calls, see above)
   services/
     soroban_client.py   All Soroban RPC interaction lives here — see its module docstring
     policy_service.py   Pure, testable local pre-check logic
-    policy_cache.py     Short-TTL cache in front of policy reads
+    policy_cache.py     Short-TTL cache in front of policy reads (pre-check and GET /policy)
     sync_worker.py      Background polling loop
 sdk/
   bridle_sdk/        Minimal client SDK package

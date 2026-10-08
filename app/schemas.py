@@ -149,6 +149,44 @@ class StatsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Policy read (GET /policy)
+# ---------------------------------------------------------------------------
+# A read-only serialization of the contract's own get_policy() and
+# get_spend_status(); no field here is computed by this backend except
+# `fetched_at`. Amounts are integers in the token's smallest unit.
+
+
+class AllowlistEntryOut(BaseModel):
+    destination: str = Field(description="Approved destination address (G... or C...).")
+    category: str = Field(description="Category tag the owner gave this destination, e.g. 'compute'.")
+
+
+class PolicyResponse(BaseModel):
+    owner: str = Field(description="Address of the policy owner, the only key that can change policy.")
+    agents: list[str] = Field(description="Registered agent addresses allowed to request spends.")
+    token: str = Field(description="SEP-41 contract ID of the token this policy governs.")
+    daily_cap: int = Field(description="Maximum total spend per UTC day, in the token's smallest unit.")
+    per_call_max: int = Field(description="Maximum amount of any single spend, in the token's smallest unit.")
+    kill_switch_active: bool = Field(description="True while all spending is halted. Read with ?fresh=true before relying on it.")
+    allowlist: list[AllowlistEntryOut] = Field(description="Every destination spends may go to.")
+    spent_today: int = Field(description="Total approved spend in the current UTC day, per get_spend_status().")
+    remaining_today: int = Field(
+        description="daily_cap minus spent_today, per get_spend_status(). Can be negative if the cap was lowered below today's spend."
+    )
+    period_start: datetime = Field(description="Start (00:00 UTC) of the day spent_today covers.")
+    fetched_at: datetime = Field(description="When this backend read these values from the chain (UTC). Older than now by at most the cache TTL unless ?fresh=true.")
+
+
+class PolicyUnavailableDetail(BaseModel):
+    error: Literal["policy_unavailable"] = "policy_unavailable"
+    message: str
+
+
+class PolicyUnavailableResponse(BaseModel):
+    detail: PolicyUnavailableDetail
+
+
+# ---------------------------------------------------------------------------
 # Policy write proxy
 # ---------------------------------------------------------------------------
 # All owner-only contract calls. Built with the owner as the transaction's

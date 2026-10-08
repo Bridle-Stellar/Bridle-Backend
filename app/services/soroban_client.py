@@ -28,7 +28,9 @@ rationale carried over from the contract's README.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from stellar_sdk import Account, Address, Asset, Keypair, TransactionBuilder, scval
 from stellar_sdk import xdr as stellar_xdr
@@ -140,6 +142,27 @@ class PolicyState:
 
 
 @dataclass(frozen=True)
+class PolicyView:
+    """One get_policy() read plus one get_spend_status() read, unmerged.
+    Backs GET /policy (which shows all of it) and, via to_state(), the
+    local pre-check (which needs only part of it)."""
+
+    snapshot: PolicySnapshot
+    status: SpendStatus
+    fetched_at: datetime  # wall-clock time of the chain read, UTC
+
+    def to_state(self) -> PolicyState:
+        return PolicyState(
+            allowlist=[e.destination for e in self.snapshot.allowlist],
+            per_call_max=self.snapshot.per_call_max,
+            daily_cap=self.snapshot.daily_cap,
+            spent_today=self.status.spent_today,
+            kill_switch_active=self.snapshot.kill_switch_active,
+            token=self.snapshot.token,
+        )
+
+
+@dataclass(frozen=True)
 class PreparedAuthorization:
     """An unsigned authorization entry plus the ledger it's valid until,
     ready for the named party to sign with stellar_sdk.auth.authorize_entry()."""
@@ -204,20 +227,15 @@ class SorobanContractClient:
         result = await self._simulate_read(CONTRACT_FN_GET_SPEND_STATUS, [])
         return _parse_spend_status(result)
 
+    async def get_policy_view(self) -> PolicyView:
+        """get_policy() and get_spend_status(), read concurrently. Either
+        failing fails the whole read; there is no partial result."""
+        snapshot, status = await asyncio.gather(self.get_policy_snapshot(), self.get_spend_status())
+        return PolicyView(snapshot=snapshot, status=status, fetched_at=datetime.now(timezone.utc))
+
     async def get_policy_state(self) -> PolicyState:
-        """Convenience read for the local pre-check: one get_policy() call
-        and one get_spend_status() call, merged into the shape
-        policy_service.py needs."""
-        snapshot = await self.get_policy_snapshot()
-        status = await self.get_spend_status()
-        return PolicyState(
-            allowlist=[e.destination for e in snapshot.allowlist],
-            per_call_max=snapshot.per_call_max,
-            daily_cap=snapshot.daily_cap,
-            spent_today=status.spent_today,
-            kill_switch_active=snapshot.kill_switch_active,
-            token=snapshot.token,
-        )
+        """Convenience read for the local pre-check, in the shape policy_service.py needs."""
+        return (await self.get_policy_view()).to_state()
 
     async def latest_ledger(self) -> int:
         health = await self._server.get_latest_ledger()
