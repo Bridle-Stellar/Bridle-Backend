@@ -1,0 +1,56 @@
+name: Wave task
+description: A scoped, claimable task for contributors (maintainers use this to post work).
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        To claim a task, comment on the issue and wait to be assigned. See CONTRIBUTING.md.
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this matters and where it fits in the backend.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What's in, and explicitly what's out.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: A checklist a reviewer can verify.
+      value: |
+        - [ ]
+        - [ ] Tests added under `tests/`
+        - [ ] `ruff check .` and `pytest` pass
+        - [ ] README / OpenAPI field descriptions updated if an endpoint changed
+    validations:
+      required: true
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Complexity
+      options:
+        - trivial
+        - medium
+        - high
+    validations:
+      required: true
+  - type: textarea
+    id: background
+    attributes:
+      label: Required background
+      description: What a contributor needs to know already, e.g. FastAPI, async SQLAlchemy, stellar-sdk, Soroban authorization entries, x402.
+    validations:
+      required: true
+  - type: textarea
+    id: pointers
+    attributes:
+      label: Pointers
+      description: Files, functions, or docs to start from.
