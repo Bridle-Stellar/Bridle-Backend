@@ -41,10 +41,10 @@ from app.services.policy_cache import PolicyStateCache
 from app.services.policy_service import precheck_payment
 from app.services.soroban_client import (
     CONTRACT_FN_CHECK_AND_RECORD_SPEND,
+    TOKEN_FN_TRANSFER,
     DecodedInvocation,
     SorobanCallError,
     SorobanContractClient,
-    TOKEN_FN_TRANSFER,
     decode_invocation,
     resolve_token_contract_id,
 )
@@ -135,13 +135,13 @@ async def submit_payment(
 
     try:
         authorization = await client.submit_check_and_record_spend(payload.spend_auth_entry_xdr)
-    except SorobanCallError:
+    except SorobanCallError as exc:
         logger.exception("check_and_record_spend submission failed")
         tx = await _log(
             db, payload.agent_public_key, payload.destination, payload.token, amount, PaymentStatus.REJECTED,
             RejectionReason.UPSTREAM_ERROR, "Could not reach the policy contract.",
         )
-        raise _rejection(tx.id, RejectionReason.UPSTREAM_ERROR, "Could not reach the policy contract.", payload.destination, payload.amount, payload.token)
+        raise _rejection(tx.id, RejectionReason.UPSTREAM_ERROR, "Could not reach the policy contract.", payload.destination, payload.amount, payload.token) from exc
 
     cache.invalidate()
 

@@ -3,10 +3,10 @@ Unit test for the SDK's local signing step — the one piece of BridleClient
 that doesn't go over HTTP and is easy to get wrong (wrong argument order to
 authorize_entry, wrong XDR round trip, etc.).
 """
-from bridle_sdk.client import BridleClient
 from stellar_sdk import Keypair
 
 from app.services.soroban_client import CONTRACT_FN_CHECK_AND_RECORD_SPEND, TOKEN_FN_TRANSFER, decode_invocation
+from bridle_sdk.client import BridleClient
 from tests.conftest import TEST_CONTRACT_ID, TEST_NETWORK_PASSPHRASE, TEST_VALID_UNTIL_LEDGER, build_unsigned_entry
 
 

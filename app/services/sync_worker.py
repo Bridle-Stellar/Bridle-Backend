@@ -55,7 +55,7 @@ class SyncWorker:
 
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._settings.sync_poll_interval_seconds)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     async def run_once(self) -> int:

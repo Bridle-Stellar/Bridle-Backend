@@ -91,8 +91,9 @@ class FakeSorobanClient:
         return self.policy
 
     async def prepare_check_and_record_spend(self, agent, destination, token_contract_id, amount) -> PreparedAuthorization:
-        from app.services.soroban_client import CONTRACT_FN_CHECK_AND_RECORD_SPEND
         from stellar_sdk import scval
+
+        from app.services.soroban_client import CONTRACT_FN_CHECK_AND_RECORD_SPEND
 
         entry_xdr = build_unsigned_entry(
             TEST_CONTRACT_ID, CONTRACT_FN_CHECK_AND_RECORD_SPEND,
@@ -102,8 +103,9 @@ class FakeSorobanClient:
         return PreparedAuthorization(entry_xdr=entry_xdr, valid_until_ledger=TEST_VALID_UNTIL_LEDGER)
 
     async def prepare_transfer(self, agent, destination, token_contract_id, amount) -> PreparedAuthorization:
-        from app.services.soroban_client import TOKEN_FN_TRANSFER
         from stellar_sdk import scval
+
+        from app.services.soroban_client import TOKEN_FN_TRANSFER
 
         entry_xdr = build_unsigned_entry(
             token_contract_id, TOKEN_FN_TRANSFER,
