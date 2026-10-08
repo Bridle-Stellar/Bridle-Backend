@@ -19,15 +19,19 @@ the final authority on every request. The local pre-check
 substitute — see Bridle Contract's own README for the actual enforcement
 rules this backend mirrors for that pre-check.
 
-This README's function names, event names, and auth model are taken
-directly from Bridle Contract's published interface. Two things remain
-this backend's own best reading of that interface rather than something
-verified against the deployed contract's binary — both are called out
-inline in `app/services/soroban_client.py`'s module docstring:
-1. The exact ScVal wire shape of `PolicySnapshot`, `SpendStatus`, and
-   `SpendOutcome` returns (the contract names these Rust types but the
-   README doesn't specify their encoding).
-2. The non-topic data field names inside each contract event's payload.
+**Verified contract interface.** Function names, return-value encodings
+(`PolicySnapshot`, `SpendStatus`, `SpendOutcome`, `RejectReason`) and
+event topics/data fields match Bridle-Contract's
+[`docs/INTERFACE.md`](https://github.com/Bridle-Stellar/Bridle-Contract/blob/main/docs/INTERFACE.md)
+at Contract commit `d7a560b`. The decoders in
+`app/services/soroban_client.py` are tested against real XDR read back
+from that contract's testnet deployment
+(`CAICNEKY…VUK5`, see its
+[`docs/DEPLOYMENTS.md`](https://github.com/Bridle-Stellar/Bridle-Contract/blob/main/docs/DEPLOYMENTS.md)):
+`get_policy` and `get_spend_status` results, the `TransactionMeta` v4 of
+one approved and one rejected `check_and_record_spend`, and the emitted
+events. The fixtures are in `tests/fixtures/testnet_interface.py`. The
+decoders are strict: an unexpected shape is an error, never a default.
 
 ## Auth model
 
@@ -115,7 +119,7 @@ Agent's client (bridle_sdk)
   Destination account              Sync worker (app/services/sync_worker.py)
                                     backfills spends made outside the relay
 
-Bridle Frontend (dashboard) ── reads only ──▶ /transactions/* (this repo)
+Bridle Frontend (dashboard) ── reads only ──▶ /transactions/*, GET /policy (this repo)
                              ── policy changes ──▶ /policy/* → unsigned XDR
                                                     → signed by owner's wallet (e.g. Freighter)
                                                     → submitted directly to the network
@@ -222,6 +226,51 @@ curl "http://localhost:8000/transactions/stats?bucket=day"
 curl "http://localhost:8000/transactions/{id}"
 ```
 
+### `GET /policy` — current on-chain policy (read-only)
+
+The contract's own `get_policy()` and `get_spend_status()`, serialized
+as-is for the dashboard: owner, registered agents, governed token, caps,
+kill switch, the full allowlist with categories, and today's spend.
+Amounts are JSON integers in the token's smallest unit (stroops for XLM).
+
+```bash
+curl "http://localhost:8000/policy"
+curl "http://localhost:8000/policy?fresh=true"   # bypass the cache
+```
+
+```json
+{
+  "owner": "GD4IDHGFDQAOSFCXLXAK5FDNI5GHKLDZJEEC6Z7O5J5IMP3G5ATJ6OX4",
+  "agents": ["GCPV6J54IAAW7YKYF23KOEVGIHXEU5UH4LRCB3KTPECGXLPCDWGXLL5M"],
+  "token": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  "daily_cap": 10000000000,
+  "per_call_max": 3000000000,
+  "kill_switch_active": false,
+  "allowlist": [{"destination": "GD57XJTA237YNXWO6N3PAJKLZPIDKV77OJK7OCCFHVOZAOC6WQJ5OMDP", "category": "compute"}],
+  "spent_today": 500000000,
+  "remaining_today": 9500000000,
+  "period_start": "2026-10-08T00:00:00Z",
+  "fetched_at": "2026-10-08T15:30:00Z"
+}
+```
+
+(Values are from the Contract's testnet deployment; see
+`tests/fixtures/testnet_interface.py`.)
+
+- **Caching.** By default this is served from the same short-TTL cache as
+  the relay pre-check (`POLICY_CACHE_TTL_SECONDS`, default 2s);
+  `fetched_at` says when the chain was actually read. Pass `?fresh=true`
+  to read the chain now. Do that before acting on `kill_switch_active`,
+  since a cached reading can be up to one TTL old.
+- **Failure.** If the chain can't be read, or returns something the strict
+  decoder doesn't recognize, the response is `502` and there is no policy
+  in the body:
+  `{"detail": {"error": "policy_unavailable", "message": "..."}}`. It never
+  falls back to a default, and `?fresh=true` never falls back to a cached
+  value.
+- `remaining_today` can be negative if the owner lowered `daily_cap` below
+  what was already spent today.
+
 ### Policy write proxy
 
 The frontend never talks to the Soroban contract directly for policy
@@ -290,20 +339,33 @@ push to `main` and every pull request.
   actual decode/validate/sign code paths run for real — only the network
   submission itself is faked. Covers approval, each rejection reason, and
   a tampered-amount request being caught before it reaches the chain.
+- `tests/test_policy_api.py` — `GET /policy` from real testnet XDR to
+  JSON, cache hit vs `?fresh=true`, kill switch on, allowlist
+  serialization, and 502 on chain failure/timeout (never a default policy).
+- `tests/test_soroban_parsers.py` — the contract-return and event decoders
+  against real testnet XDR (`tests/fixtures/`), plus the malformed shapes
+  they must refuse (e.g. a missing `kill_switch` is an error, not "off").
+- `tests/test_sync_worker.py` — sync worker ingestion of real
+  `spend_approved` / `spend_rejected` / policy events, including the
+  contract `RejectReason` → API `rejection_reason` mapping and dedupe.
 - `tests/test_sdk_client.py` — unit test for the SDK's own signing step.
 - `tests/test_transactions_api.py` — filtering, pagination, and the
   summary/stats aggregate calculations against a seeded in-memory SQLite DB.
 
-**Manual/integration testing against real testnet:** once a Bridle
-Contract instance is deployed to testnet, point `.env` at its
-`BRIDLE_CONTRACT_ID`, fund `RELAYER_SECRET_KEY` with testnet XLM via
-[Friendbot](https://friendbot.stellar.org) (it only needs enough for
-fees), register an agent identity with the contract's `add_agent` and
-fund *that* keypair too if the token is native XLM held in the agent's
-own account, and run `client.pay(...)` via the SDK end to end. There's no
-automated CI integration test against a live testnet yet (would need a
-way to stand up a fresh contract instance per run) — that's a good first
-contribution.
+**Integration testing against real testnet:** `tests/integration/`
+deploys a fresh Bridle Contract instance with Friendbot-funded throwaway
+accounts, runs this backend over real HTTP, and drives it with the SDK:
+`GET /policy`, an allowlist add through the write proxy, an approved
+`pay()`, a per-call-max rejection, and the kill switch. It's skipped
+unless you opt in:
+
+```bash
+BRIDLE_INTEGRATION=1 BRIDLE_CONTRACT_WASM=path/to/bridle_contract.wasm pytest tests/integration -v -s
+```
+
+See [docs/INTEGRATION_TESTING.md](docs/INTEGRATION_TESTING.md) for
+building the wasm, the manual path against your own deployment, and the
+recorded passing run.
 
 **Latency note:** this sits in a payment hot path, and it now makes more
 RPC round trips than a single-call design would: `/relay/prepare` does a
@@ -332,11 +394,11 @@ app/
   routers/
     relay.py         POST /relay/prepare, POST /relay/submit
     transactions.py  GET /transactions, /transactions/summary, /transactions/stats
-    policy.py         POST /policy/* (owner-only contract calls, see above)
+    policy.py        GET /policy, POST /policy/* (owner-only contract calls, see above)
   services/
     soroban_client.py   All Soroban RPC interaction lives here — see its module docstring
     policy_service.py   Pure, testable local pre-check logic
-    policy_cache.py     Short-TTL cache in front of policy reads
+    policy_cache.py     Short-TTL cache in front of policy reads (pre-check and GET /policy)
     sync_worker.py      Background polling loop
 sdk/
   bridle_sdk/        Minimal client SDK package
@@ -364,12 +426,6 @@ issues:
   handle it in `policy_service.py` → document it in this README's
   endpoint table).
 - Add CSV export to `GET /transactions` (an `?format=csv` query param).
-- Add a real integration test against a locally-run Soroban testnet
-  contract instance in CI.
-- Verify `_parse_policy_snapshot` / `_parse_spend_status` /
-  `_parse_spend_outcome` in `app/services/soroban_client.py` against the
-  contract's actual generated XDR spec, and tighten them from
-  best-reading to confirmed.
 - Swap the `sync_cursor` single-row bookmark for per-contract cursors
   ahead of multi-contract support.
 

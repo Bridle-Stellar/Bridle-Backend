@@ -4,20 +4,16 @@ this backend allowed to talk to Soroban RPC. Everything else (routers,
 policy_service, sync_worker) goes through the `SorobanContractClient`
 defined here.
 
---- Contract interface confirmed against Bridle Contract's README ---
-Function names, event topics, and the auth model below are taken directly
-from that repo's documented interface, not guessed. Two things are still
-this backend's own interpretation, called out where they occur:
-  1. The exact ScVal shape of `PolicySnapshot`, `SpendStatus`, and
-     `SpendOutcome` returns (the README names the Rust types but not their
-     wire encoding) — see `_parse_policy_snapshot`, `_parse_spend_status`,
-     and `_parse_spend_outcome`. If the deployed contract's actual
-     `#[contracttype]` layout differs, those three functions are the only
-     things that need to change.
-  2. Which allowlist/agent/ownership contract events carry which topics —
-     event *names* are confirmed; exact non-topic data field names inside
-     each event's payload are this backend's best reading of the table in
-     that README.
+--- Contract interface: verified ---
+Function names, return types, event topics and event data fields match
+Bridle-Contract's docs/INTERFACE.md at Contract commit d7a560b. The ScVal
+decoders at the bottom of this module (`_parse_policy_snapshot`,
+`_parse_spend_status`, `_parse_spend_outcome`, `_decode_event_value`) are
+tested against real XDR read back from that contract's testnet deployment
+(see tests/fixtures/testnet_interface.py), not hand-built values. They are
+strict: an unexpected shape raises SorobanCallError rather than defaulting.
+If the contract's `#[contracttype]`s or events change, update INTERFACE.md
+there and the decoders and fixtures here together.
 
 --- Auth model (confirmed) ---
 `check_and_record_spend` requires the *agent's* Soroban authorization
@@ -32,7 +28,9 @@ rationale carried over from the contract's README.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from stellar_sdk import Account, Address, Asset, Keypair, TransactionBuilder, scval
 from stellar_sdk import xdr as stellar_xdr
@@ -71,6 +69,17 @@ EVENT_AGENT_ADDED = "agent_added"
 EVENT_AGENT_REMOVED = "agent_removed"
 EVENT_OWNERSHIP_TRANSFER_PROPOSED = "ownership_transfer_proposed"
 EVENT_OWNERSHIP_TRANSFERRED = "ownership_transferred"
+
+# --- Contract RejectReason variants (docs/INTERFACE.md, "RejectReason") ----------
+CONTRACT_REJECT_REASONS = (
+    "KillSwitchActive",
+    "UnknownAgent",
+    "InvalidAmount",
+    "WrongToken",
+    "DestinationNotAllowed",
+    "ExceedsPerCallMax",
+    "ExceedsDailyCap",
+)
 
 DEFAULT_BASE_FEE = 100
 TX_TIMEOUT_SECONDS = 30
@@ -113,8 +122,10 @@ class PolicySnapshot:
 class SpendStatus:
     """Raw `get_spend_status()` result."""
 
+    daily_cap: int
+    period_start: int  # 00:00:00 UTC of the current day, unix seconds
     spent_today: int
-    remaining_today: int
+    remaining_today: int  # signed: negative if the cap was lowered below today's spend
 
 
 @dataclass(frozen=True)
@@ -128,6 +139,27 @@ class PolicyState:
     spent_today: int
     kill_switch_active: bool
     token: str
+
+
+@dataclass(frozen=True)
+class PolicyView:
+    """One get_policy() read plus one get_spend_status() read, unmerged.
+    Backs GET /policy (which shows all of it) and, via to_state(), the
+    local pre-check (which needs only part of it)."""
+
+    snapshot: PolicySnapshot
+    status: SpendStatus
+    fetched_at: datetime  # wall-clock time of the chain read, UTC
+
+    def to_state(self) -> PolicyState:
+        return PolicyState(
+            allowlist=[e.destination for e in self.snapshot.allowlist],
+            per_call_max=self.snapshot.per_call_max,
+            daily_cap=self.snapshot.daily_cap,
+            spent_today=self.status.spent_today,
+            kill_switch_active=self.snapshot.kill_switch_active,
+            token=self.snapshot.token,
+        )
 
 
 @dataclass(frozen=True)
@@ -195,20 +227,15 @@ class SorobanContractClient:
         result = await self._simulate_read(CONTRACT_FN_GET_SPEND_STATUS, [])
         return _parse_spend_status(result)
 
+    async def get_policy_view(self) -> PolicyView:
+        """get_policy() and get_spend_status(), read concurrently. Either
+        failing fails the whole read; there is no partial result."""
+        snapshot, status = await asyncio.gather(self.get_policy_snapshot(), self.get_spend_status())
+        return PolicyView(snapshot=snapshot, status=status, fetched_at=datetime.now(timezone.utc))
+
     async def get_policy_state(self) -> PolicyState:
-        """Convenience read for the local pre-check: one get_policy() call
-        and one get_spend_status() call, merged into the shape
-        policy_service.py needs."""
-        snapshot = await self.get_policy_snapshot()
-        status = await self.get_spend_status()
-        return PolicyState(
-            allowlist=[e.destination for e in snapshot.allowlist],
-            per_call_max=snapshot.per_call_max,
-            daily_cap=snapshot.daily_cap,
-            spent_today=status.spent_today,
-            kill_switch_active=snapshot.kill_switch_active,
-            token=snapshot.token,
-        )
+        """Convenience read for the local pre-check, in the shape policy_service.py needs."""
+        return (await self.get_policy_view()).to_state()
 
     async def latest_ledger(self) -> int:
         health = await self._server.get_latest_ledger()
@@ -220,18 +247,7 @@ class SorobanContractClient:
             filters=[EventFilter(event_type=EventFilterType.CONTRACT, contract_ids=[self._contract_id])],
             limit=limit,
         )
-        events: list[RawContractEvent] = []
-        for e in response.events:
-            events.append(
-                RawContractEvent(
-                    ledger=e.ledger,
-                    event_type=_decode_topic0(e.topic),
-                    topic=_decode_topic(e.topic),
-                    data=_decode_event_value(e.value),
-                    tx_hash=e.transaction_hash,
-                )
-            )
-        return events
+        return [decode_raw_event(e.ledger, e.transaction_hash, e.topic, e.value) for e in response.events]
 
     # -- Agent-authorized spend flow -----------------------------------------------
     # See app/routers/relay.py for the two-step exchange these support: the
@@ -284,7 +300,7 @@ class SorobanContractClient:
                 authorized=True, tx_hash=tx_hash,
                 spent_today=outcome.spent_today, remaining_today=outcome.remaining_today,
             )
-        return SpendAuthorization(authorized=False, tx_hash=tx_hash, reason=outcome.reason)
+        return SpendAuthorization(authorized=False, tx_hash=tx_hash, reason=f"Rejected by the policy contract: {outcome.reason}")
 
     async def submit_transfer(self, signed_entry_xdr: str) -> str:
         """Submits the SEP-41 transfer, agent-authorized, that Bridle
@@ -427,58 +443,120 @@ def _find_unsigned_entry_for(entries: list[str], authorizer: str) -> str | None:
     return None
 
 
+def decode_raw_event(ledger: int, tx_hash: str, topic_xdr_list: list, value_xdr) -> RawContractEvent:
+    """One getEvents entry (base64 topic/value XDR) -> RawContractEvent."""
+    return RawContractEvent(
+        ledger=ledger,
+        event_type=_decode_topic0(topic_xdr_list),
+        topic=_decode_topic(topic_xdr_list),
+        data=_decode_event_value(value_xdr),
+        tx_hash=tx_hash,
+    )
+
+
 def _decode_topic0(topic_xdr_list: list) -> str:
     if not topic_xdr_list:
         return ""
-    return str(scval.to_native(topic_xdr_list[0]))
+    return str(_json_native(scval.to_native(topic_xdr_list[0])))
 
 
 def _decode_topic(topic_xdr_list: list) -> str:
-    return ".".join(str(scval.to_native(t)) for t in topic_xdr_list)
+    """`<event name>.<topic 1>.<topic 2>...` with addresses as plain G.../C...
+    strings, e.g. `spend_approved.<agent>.<destination>`."""
+    return ".".join(str(_json_native(scval.to_native(t))) for t in topic_xdr_list)
 
 
 def _decode_event_value(value_xdr) -> dict:
-    native = scval.to_native(value_xdr)
-    return native if isinstance(native, dict) else {"value": native}
+    """Every Bridle event's data is an ScMap of its non-topic fields
+    (docs/INTERFACE.md, "Events"); fields-less events carry an empty map,
+    not Void. Returned JSON-safe so it can be stored as-is."""
+    native = _json_native(scval.to_native(value_xdr))
+    if not isinstance(native, dict):
+        raise SorobanCallError(f"Expected an event data map, got {native!r}")
+    return native
+
+
+def _json_native(value):
+    """scval.to_native output with Address objects flattened to their
+    G.../C... strings, recursively, so the result is JSON-serializable."""
+    if isinstance(value, Address):
+        return value.address
+    if isinstance(value, dict):
+        return {str(k): _json_native(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_native(v) for v in value]
+    return value
 
 
 # --- ScVal decoding for get_policy / get_spend_status / SpendOutcome -------------
-# See module docstring point (1): field names below are this backend's best
-# reading of the README's type table, not verified against the contract's
-# actual #[contracttype] layout. If these don't match, this is the only
-# place that needs to change.
+# Verified against Bridle-Contract's docs/INTERFACE.md (Contract commit
+# d7a560b) and against real values read back from its testnet deployment
+# (contract CAICNEKY4YT7M2K56RTI47WBFAUE2KZRKHZIYPFPQWGB23DDERZJVUK5); the
+# XDR in tests/fixtures/testnet_interface.py is that real data.
+#
+# Strict on purpose: a missing or wrongly-typed field raises SorobanCallError
+# instead of falling back to a default. A defaulted kill switch reads as
+# "off", which is the unsafe direction.
+
+
+def _field(native: dict, key: str, expected: type, type_name: str):
+    if key not in native:
+        raise SorobanCallError(f"{type_name} is missing field {key!r}; got keys {sorted(native)}")
+    value = native[key]
+    if expected is str and isinstance(value, Address):
+        return value.address
+    # bool is a subclass of int; never accept one for the other.
+    if not isinstance(value, expected) or (expected is int and isinstance(value, bool)):
+        raise SorobanCallError(f"{type_name}.{key} should be {expected.__name__}, got {value!r}")
+    return value
+
+
+def _as_map(native, type_name: str) -> dict:
+    if not isinstance(native, dict):
+        raise SorobanCallError(f"Expected {type_name} to decode to a map, got {native!r}")
+    return native
 
 
 def _parse_policy_snapshot(value: stellar_xdr.SCVal) -> PolicySnapshot:
-    native = scval.to_native(value)
-    allowlist_raw = native.get("allowlist", [])
-    allowlist = [
-        AllowlistEntry(destination=_plain_native(e.get("destination")), category=str(e.get("category", "")))
-        for e in allowlist_raw
-    ]
+    native = _as_map(scval.to_native(value), "PolicySnapshot")
+    allowlist = []
+    for raw in _field(native, "allowlist", list, "PolicySnapshot"):
+        entry = _as_map(raw, "AllowlistEntry")
+        allowlist.append(
+            AllowlistEntry(
+                destination=_field(entry, "destination", str, "AllowlistEntry"),
+                category=_field(entry, "category", str, "AllowlistEntry"),
+            )
+        )
+    agents = _field(native, "agents", list, "PolicySnapshot")
+    for agent in agents:
+        if not isinstance(agent, Address):
+            raise SorobanCallError(f"PolicySnapshot.agents should hold addresses, got {agent!r}")
     return PolicySnapshot(
-        owner=_plain_native(native.get("owner")),
-        agents=[_plain_native(a) for a in native.get("agents", [])],
-        token=_plain_native(native.get("token")),
-        daily_cap=int(native.get("daily_cap", 0)),
-        per_call_max=int(native.get("per_call_max", 0)),
-        kill_switch_active=bool(native.get("kill_switch_active", False)),
+        owner=_field(native, "owner", str, "PolicySnapshot"),
+        agents=[a.address for a in agents],
+        token=_field(native, "token", str, "PolicySnapshot"),
+        daily_cap=_field(native, "daily_cap", int, "PolicySnapshot"),
+        per_call_max=_field(native, "per_call_max", int, "PolicySnapshot"),
+        kill_switch_active=_field(native, "kill_switch", bool, "PolicySnapshot"),
         allowlist=allowlist,
     )
 
 
 def _parse_spend_status(value: stellar_xdr.SCVal) -> SpendStatus:
-    native = scval.to_native(value)
+    native = _as_map(scval.to_native(value), "SpendStatus")
     return SpendStatus(
-        spent_today=int(native.get("spent_today", 0)),
-        remaining_today=int(native.get("remaining_today", 0)),
+        daily_cap=_field(native, "daily_cap", int, "SpendStatus"),
+        period_start=_field(native, "period_start", int, "SpendStatus"),
+        spent_today=_field(native, "spent_today", int, "SpendStatus"),
+        remaining_today=_field(native, "remaining_today", int, "SpendStatus"),
     )
 
 
 @dataclass(frozen=True)
 class _SpendOutcome:
     approved: bool
-    reason: str | None = None
+    reason: str | None = None  # RejectReason variant name, e.g. "ExceedsPerCallMax"
     spent_today: int | None = None
     remaining_today: int | None = None
 
@@ -487,25 +565,37 @@ def _parse_spend_outcome(result_meta_xdr: str | None) -> _SpendOutcome:
     if not result_meta_xdr:
         raise SorobanCallError("Transaction succeeded but returned no result metadata.")
     meta = stellar_xdr.TransactionMeta.from_xdr(result_meta_xdr)
-    if meta.v3 is None or meta.v3.soroban_meta is None:
-        raise SorobanCallError("Transaction result metadata did not contain a Soroban return value.")
-    native = scval.to_native(meta.v3.soroban_meta.return_value)
+    # Protocol 23+ (testnet is on 29) returns TransactionMeta v4; v3 is kept
+    # for older networks. Both carry the contract's return value in soroban_meta.
+    body = meta.v4 or meta.v3
+    if body is None or body.soroban_meta is None or body.soroban_meta.return_value is None:
+        raise SorobanCallError(f"Transaction result metadata (v{meta.v}) did not contain a Soroban return value.")
+    return parse_spend_outcome_value(body.soroban_meta.return_value)
 
-    # Rust `enum SpendOutcome { Approved { spent_today, remaining_today }, Rejected(reason) }`
-    # commonly bridges to Python as either a one-key map ({"Approved": {...}})
-    # or a two-element vec (["Approved", {...}]) depending on SDK version.
-    if isinstance(native, dict) and len(native) == 1:
-        tag, payload = next(iter(native.items()))
-    elif isinstance(native, (list, tuple)) and native:
-        tag, payload = native[0], native[1] if len(native) > 1 else None
-    else:
+
+def parse_spend_outcome_value(value: stellar_xdr.SCVal) -> _SpendOutcome:
+    """`SpendOutcome` is a tuple-variant union: Vec[Symbol("Approved"),
+    SpendReceipt map] or Vec[Symbol("Rejected"), Vec[Symbol(<RejectReason>)]]."""
+    native = scval.to_native(value)
+    if not (isinstance(native, list) and len(native) == 2 and isinstance(native[0], str)):
         raise SorobanCallError(f"Unrecognized SpendOutcome encoding: {native!r}")
+    tag, payload = native
 
-    if str(tag) == "Approved":
-        payload = payload or {}
+    if tag == "Approved":
+        receipt = _as_map(payload, "SpendReceipt")
         return _SpendOutcome(
             approved=True,
-            spent_today=int(payload.get("spent_today", 0)),
-            remaining_today=int(payload.get("remaining_today", 0)),
+            spent_today=_field(receipt, "spent_today", int, "SpendReceipt"),
+            remaining_today=_field(receipt, "remaining_today", int, "SpendReceipt"),
         )
-    return _SpendOutcome(approved=False, reason=str(payload) if payload is not None else "Rejected by policy contract.")
+    if tag == "Rejected":
+        return _SpendOutcome(approved=False, reason=parse_reject_reason(payload))
+    raise SorobanCallError(f"Unrecognized SpendOutcome variant: {tag!r}")
+
+
+def parse_reject_reason(native) -> str:
+    """A `RejectReason` is a unit-variant enum, which decodes to a
+    one-element list holding the variant name: ["ExceedsPerCallMax"]."""
+    if isinstance(native, list) and len(native) == 1 and native[0] in CONTRACT_REJECT_REASONS:
+        return native[0]
+    raise SorobanCallError(f"Unrecognized RejectReason encoding: {native!r}")

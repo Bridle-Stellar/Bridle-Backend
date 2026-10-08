@@ -1,5 +1,10 @@
 """
-Policy write proxy.
+Policy read endpoint and write proxy.
+
+GET /policy serializes the contract's own get_policy() + get_spend_status()
+for the dashboard. It computes nothing itself, and if the chain read fails
+it returns 502 — never a default policy, since a defaulted kill switch
+would read as "off".
 
 DESIGN CHOICE (documented per the brief): the frontend does not call the
 Soroban contract directly to change policy. Instead it POSTs the intended
@@ -16,16 +21,23 @@ is unrelated to and cannot substitute for this.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import asyncio
+import logging
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from stellar_sdk import scval
 
 from app.config import Settings
-from app.deps import get_app_settings, get_soroban_client
+from app.deps import get_app_settings, get_policy_cache, get_soroban_client
 from app.schemas import (
     AcceptOwnershipRequest,
     AddAgentRequest,
     AddAllowlistEntryRequest,
+    AllowlistEntryOut,
     KillSwitchRequest,
+    PolicyResponse,
+    PolicyUnavailableResponse,
     RemoveAgentRequest,
     RemoveAllowlistEntryRequest,
     SetDailyCapRequest,
@@ -33,6 +45,7 @@ from app.schemas import (
     TransferOwnershipRequest,
     UnsignedTransactionEnvelope,
 )
+from app.services.policy_cache import PolicyStateCache
 from app.services.soroban_client import (
     CONTRACT_FN_ACCEPT_OWNERSHIP,
     CONTRACT_FN_ADD_AGENT,
@@ -46,7 +59,48 @@ from app.services.soroban_client import (
     SorobanContractClient,
 )
 
+logger = logging.getLogger("bridle.policy")
+
 router = APIRouter(prefix="/policy", tags=["policy"])
+
+
+@router.get(
+    "",
+    response_model=PolicyResponse,
+    responses={502: {"description": "The policy could not be read from the chain.", "model": PolicyUnavailableResponse}},
+    summary="Current on-chain policy and today's spend",
+    description=(
+        "The contract's get_policy() and get_spend_status(), as-is: owner, agents, token, caps, kill switch, "
+        "allowlist, and today's spend. Served from the short-TTL policy cache unless `fresh=true`. "
+        "If the chain can't be read, returns 502; it never returns a default or partial policy."
+    ),
+)
+async def get_policy(
+    fresh: bool = Query(default=False, description="Bypass the cache and read the chain now. Use before acting on kill_switch_active."),
+    cache: PolicyStateCache = Depends(get_policy_cache),
+    settings: Settings = Depends(get_app_settings),
+) -> PolicyResponse:
+    try:
+        view = await asyncio.wait_for(cache.get_view(force_refresh=fresh), timeout=settings.request_timeout_seconds)
+    except Exception as exc:  # noqa: BLE001 - any failure to read the chain is a 502, never a fallback policy
+        logger.exception("Could not read policy from the chain")
+        message = "Timed out reading policy from the chain." if isinstance(exc, TimeoutError) else f"Could not read policy from the chain: {exc}"
+        raise HTTPException(status_code=502, detail={"error": "policy_unavailable", "message": message}) from exc
+
+    snapshot, status = view.snapshot, view.status
+    return PolicyResponse(
+        owner=snapshot.owner,
+        agents=snapshot.agents,
+        token=snapshot.token,
+        daily_cap=snapshot.daily_cap,
+        per_call_max=snapshot.per_call_max,
+        kill_switch_active=snapshot.kill_switch_active,
+        allowlist=[AllowlistEntryOut(destination=e.destination, category=e.category) for e in snapshot.allowlist],
+        spent_today=status.spent_today,
+        remaining_today=status.remaining_today,
+        period_start=datetime.fromtimestamp(status.period_start, tz=timezone.utc),
+        fetched_at=view.fetched_at,
+    )
 
 
 async def _build(client: SorobanContractClient, settings: Settings, function_name: str, parameters: list, owner_public_key: str, description: str) -> UnsignedTransactionEnvelope:
@@ -86,7 +140,7 @@ async def build_add_allowlist_entry_tx(
 ) -> UnsignedTransactionEnvelope:
     return await _build(
         client, settings, CONTRACT_FN_ADD_ALLOWLIST_ENTRY,
-        [scval.to_address(payload.destination), scval.to_string(payload.category)],
+        [scval.to_address(payload.destination), scval.to_symbol(payload.category)],
         payload.owner_public_key, f"Approve {payload.destination} ({payload.category})",
     )
 
