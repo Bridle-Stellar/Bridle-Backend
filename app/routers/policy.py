@@ -86,7 +86,7 @@ async def build_add_allowlist_entry_tx(
 ) -> UnsignedTransactionEnvelope:
     return await _build(
         client, settings, CONTRACT_FN_ADD_ALLOWLIST_ENTRY,
-        [scval.to_address(payload.destination), scval.to_string(payload.category)],
+        [scval.to_address(payload.destination), scval.to_symbol(payload.category)],
         payload.owner_public_key, f"Approve {payload.destination} ({payload.category})",
     )
 

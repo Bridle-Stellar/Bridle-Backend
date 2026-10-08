@@ -178,7 +178,10 @@ class SetPerCallMaxRequest(OwnerActionRequest):
 
 class AddAllowlistEntryRequest(OwnerActionRequest):
     destination: str = Field(description="Stellar address to approve.")
-    category: str = Field(description="Free-form category tag, e.g. 'compute', 'data', 'api'.")
+    category: str = Field(
+        pattern=r"^[A-Za-z0-9_]{1,32}$",
+        description="Category tag, e.g. 'compute', 'data', 'api'. Stored on-chain as a Soroban Symbol: 1-32 chars of a-z, A-Z, 0-9, _.",
+    )
 
 
 class RemoveAllowlistEntryRequest(OwnerActionRequest):
