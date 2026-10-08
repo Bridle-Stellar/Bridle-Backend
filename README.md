@@ -352,16 +352,20 @@ push to `main` and every pull request.
 - `tests/test_transactions_api.py` — filtering, pagination, and the
   summary/stats aggregate calculations against a seeded in-memory SQLite DB.
 
-**Manual/integration testing against real testnet:** once a Bridle
-Contract instance is deployed to testnet, point `.env` at its
-`BRIDLE_CONTRACT_ID`, fund `RELAYER_SECRET_KEY` with testnet XLM via
-[Friendbot](https://friendbot.stellar.org) (it only needs enough for
-fees), register an agent identity with the contract's `add_agent` and
-fund *that* keypair too if the token is native XLM held in the agent's
-own account, and run `client.pay(...)` via the SDK end to end. There's no
-automated CI integration test against a live testnet yet (would need a
-way to stand up a fresh contract instance per run) — that's a good first
-contribution.
+**Integration testing against real testnet:** `tests/integration/`
+deploys a fresh Bridle Contract instance with Friendbot-funded throwaway
+accounts, runs this backend over real HTTP, and drives it with the SDK:
+`GET /policy`, an allowlist add through the write proxy, an approved
+`pay()`, a per-call-max rejection, and the kill switch. It's skipped
+unless you opt in:
+
+```bash
+BRIDLE_INTEGRATION=1 BRIDLE_CONTRACT_WASM=path/to/bridle_contract.wasm pytest tests/integration -v -s
+```
+
+See [docs/INTEGRATION_TESTING.md](docs/INTEGRATION_TESTING.md) for
+building the wasm, the manual path against your own deployment, and the
+recorded passing run.
 
 **Latency note:** this sits in a payment hot path, and it now makes more
 RPC round trips than a single-call design would: `/relay/prepare` does a
@@ -422,8 +426,6 @@ issues:
   handle it in `policy_service.py` → document it in this README's
   endpoint table).
 - Add CSV export to `GET /transactions` (an `?format=csv` query param).
-- Add a real integration test against a locally-run Soroban testnet
-  contract instance in CI.
 - Swap the `sync_cursor` single-row bookmark for per-contract cursors
   ahead of multi-contract support.
 
